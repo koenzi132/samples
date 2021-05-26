@@ -1,832 +1,560 @@
 /* eslint-disable indent */
-// 추후 ShopDetailScene 코드 정리 예정 (2019.11.27 김호연)
 import React, { Component } from 'react';
 import {
     View,
     StyleSheet,
-    Text,
-    TouchableOpacity,
     Platform,
+    Text,
 } from 'react-native';
-import moment from 'moment';
-import _ from 'lodash';
-import {
-    NavigationEvents,
-    SafeAreaView,
-} from 'react-navigation';
+import DeviceInfo from 'react-native-device-info';
+import { NavigationEvents } from 'react-navigation';
 import Toast from 'react-native-simple-toast';
+import { reaction } from 'mobx';
+import _ from 'lodash';
+import Popover, { Rect } from 'react-native-popover-view';
 
-import StatusBar from '../../../components/header/StatusBar';
-import ProgressBar from '../../../components/progress/ProgressBar';
-import { injectStore } from '../../../components/hoc/context/MobxInjector';
-import NavHeaderScrollView from '../../../components/view/NavHeaderScrollView';
-import HorizontalTabBar from '../../../components/tabbar/HorizontalTabBar';
-import ModalBase from '../../../components/modal/ModalBase';
-import CartShortcutButton from '../../../components/button/CartShortcutButton';
-import InfiniteViewPager from '../../../components/pager/ViewPager/InfiniteViewPager';
-import ShopTabInfoView from './ShopTabInfoView';
-import ShopTabGoodsView from './ShopTabGoodsView';
-import ShopInfoBodyView from './ShopInfoBodyView';
-import ShopTabReviewView from './ShopTabReviewView';
-import MinPriceModal from './MinPriceModal';
-import DiscountInfoModal from './DiscountInfoModal';
-import DeliveryCostDetailModal from './DeliveryCostDetailModal';
-import AlertButtonDialog from '../../../components/dialog/AlertButtonDialog';
-import { createAbsoluteModal } from '../../../components/hoc/ModalContainer';
-import DialogHelper from '../../../api/util/DialogHelper';
+import NavigationSearchBar from '../../components/header/NavigationSearchBar';
+import { injectStore } from '../../components/hoc/context/MobxInjector';
+import CartShortcutButton from '../../components/button/CartShortcutButton';
+import ShopListTabView from './ShopListTabView';
 
-import StyleConfig from '../../../config/StyleConfig';
-import NetworkConfig from '../../../config/NetworkConfig';
-import LayoutConfig from '../../../config/LayoutConfig';
-import Globals from '../../../config/Globals';
+import { getCancelToken } from '../../api/NetworkLayer';
+import NavBarHelper from '../../api/util/NavBarHelper';
+import ListHelper from '../../api/util/ListHelper';
+import FirebaseHelper, { EVENT_NAME_TABLE } from '../../api/util/FirebaseHelper';
 
+import StyleConfig from '../../config/StyleConfig';
+import i18n from '../../localization/i18n';
+import Globals, { DEV_MODE } from '../../config/Globals';
+import LayoutConfig from '../../config/LayoutConfig';
 import {
     getWidthScaledValue as wsv,
-    getShopStateText,
-} from '../../../api/util';
-import TimerHelper, { TYPE } from '../../../api/util/TimerHelper';
-import FirebaseHelper, {
-    EVENT_NAME_TABLE,
-    REVIEW_EVENT_NAME_TABLE,
-} from '../../../api/util/FirebaseHelper';
-import { getCancelToken } from '../../../api/NetworkLayer';
+} from '../../api/util';
+import textStyles from '../../assets/styles/textStyles';
 
-import i18n from '../../../localization/i18n';
-import textStyles from '../../../assets/styles/textStyles';
+class ShopListScene extends Component {
+    static generatePagesFromProps(props) {
+        const { rootStore } = props;
+        const branchStore = rootStore.getStore('branchStore');
+        const branch = branchStore.getBranch();
+        const foodCategories = branch.getFoodCategories();
 
-const ModalAlertButtonDialog = createAbsoluteModal(AlertButtonDialog);
-
-const TAB_BAR_HEIGHT = wsv(47);
-const TAB_BAR_BOTTOM_MARGIN = wsv(20);
-
-class ShopDetailScene extends Component {
-    constructor(props) {
-        super(props);
-
-        const { rootStore } = this.props;
         const userStore = rootStore.getStore('userStore');
+        const user = userStore.getUser();
 
-        this.state = {
-            secondsToClosed: 0,
-            deliveryCostModalVisible: false,
-            deliveryEvent: [],
-            itemEvents: [],
-            vendor: undefined,
-            vendorMinPrice: 0,
-            isFavoriteVendor: false,
-            cartDeliveryCost: 0,
-            itemGroupsWithoutDefault: [],
-            today: this.getDayOfWeek(),
-            useReminder: true,
-            activatedTab: 0,
-            reviewHeight: this.getReviewHeight(),
-            reviewScrollEnabled: false,
-            reviewPage: 0,
-            reviewData: [],
-            totalReviewCount: 0,
-            reviewHeaderText: '',
-            deleteReviewDialogProps: null,
-            userId: userStore.getUser().getId() || '',
-            isUserValid: userStore.getUser().isValid(),
-            reviewProgressBar: true,
-        };
+        if (foodCategories.length < 1) {
+            return [];
+        }
 
-        this.tabData = [
-            {
-                screen: ShopTabGoodsView,
-                title: i18n.t('goods_tab_title'),
-            },
-            {
-                screen: ShopTabInfoView,
-                title: i18n.t('info_tab_title'),
-            },
-            {
-                screen: ShopTabReviewView,
-                title: i18n.t('review'),
-            },
-        ];
-        this.reviewDataEnd = false;
-        this.reviewSortType = Globals.REVIEW_SORT_TYPES.VENDOR_REVIEW_LIKE;
+        const keySuffix = branch.getBranchId();
+        const pages = [];
+
+        for (let i = 0; i < foodCategories.length; i += 1) {
+            const foodCategory = foodCategories[i];
+            if (foodCategory.available
+                && (user.isValid()
+                    || (!foodCategory.isFavoriteCategory
+                        && !foodCategory.isRecommendationCategory))) {
+                pages.push({
+                    key: `${keySuffix}TabPage${i}`,
+                    tabLabel: {
+                        key: `${keySuffix}Tab${foodCategory.name}`,
+                        label: foodCategory.name, // Just use default name for now
+                    },
+                    pageData: [],
+                    // foodCategory is used in the query of the search
+                    foodCategory: foodCategory.name,
+                    // '-1' means this page is not initialized
+                    currentPageIndex: foodCategory.isFavoriteCategory && !user.isValid() ? 0 : -1,
+                    isForBestCategory: foodCategory.isBestCategory,
+                    isForFavorites: foodCategory.isFavoriteCategory,
+                    isForEvents: foodCategory.isEventCategory,
+                    isForRecommendCategory: foodCategory.isRecommendationCategory,
+                    endReached: false,
+                    refreshing: false,
+                    foodCategoryForAnalytic: foodCategory.nameEn || 'category_no_name',
+                });
+            }
+        }
+        return pages;
     }
 
-    async componentDidMount() {
-        const { navigation } = this.props;
-        const vendorId = navigation.getParam('vendorId');
+    static isNonSortablePage(page) {
+        return page.isForBestCategory
+            || page.isForFavorites
+            || page.isForEvents
+            || page.isForRecommendCategory;
+    }
 
-        if (!vendorId) {
+    static setNodeMaxValue(
+        tabAnimProps,
+        size,
+        index,
+    ) {
+        const { animationProps } = tabAnimProps;
+        if (!animationProps) {
+            return;
+        }
+        const { maxValue } = animationProps.scrollValues[index];
+
+        maxValue.setValue(size);
+    }
+
+    static ONEND_REACHED_THRESHOLD = 50;
+
+    constructor(props) {
+        super(props);
+        const { rootStore } = props;
+        const branchStore = rootStore.getStore('branchStore');
+        const available = branchStore.checkIfAvailable({ assistCode: Globals.FOOD_ASSIST_CODE });
+        const sceneStore = rootStore.getStore('sceneStore');
+        const userStore = rootStore.getStore('userStore');
+        const pages = available ? ShopListScene.generatePagesFromProps(props) : [];
+
+        const userId = userStore.getUser().getId();
+
+        this.state = {
+            pages,
+            activeTab: 0,
+            sortType: sceneStore.getActiveShopListSortType(),
+            searchText: undefined,
+            tabAnimProps: this.createTabAnimProps(pages.length),
+            navBarAnimDisabled: false,
+            scrollEnabled: true,
+            userId,
+            popoverIsVisible: false,
+        };
+
+        this.tabViewProps = this.createTabViewProps();
+
+        this.fetchTabDataFunctions = {};
+        this.cancelTokenMap = {};
+        this.pageMaxHeightMap = {};
+
+        this.tabViewRef = React.createRef();
+        this.popoverRect = new Rect(
+            0,
+            0,
+            LayoutConfig.SCREEN_WIDTH,
+            NavigationSearchBar.getHeight() + LayoutConfig.SEARCHBAR_HEIGHT,
+        );
+        this.POPOVER_TIME = Globals.A_SECOND_IN_MILLISECONDS * 7;
+    }
+
+    componentDidMount() {
+        const { rootStore, navigation } = this.props;
+        const { activeTab, pages } = this.state;
+
+        const branchStore = rootStore.getStore('branchStore');
+        if (!branchStore.checkIfAvailable({ assistCode: Globals.FOOD_ASSIST_CODE })
+            || pages.length < 1) {
             navigation.pop();
             return;
         }
-        const result = await this.loadVendor(vendorId);
 
-        if (result.error) {
-            return;
+        this.loadMoreInTab(activeTab);
+        this.favoriteIndex = this.findFavoritePageIndex(pages);
+
+        this.userListener = reaction(
+            () => {
+                const userStore = rootStore.getStore('userStore');
+                const user = userStore.getUser();
+
+                return user;
+            },
+            (user) => {
+                const { userId } = this.state;
+                if (userId === user.getId()) {
+                    return;
+                }
+                const newPages = ShopListScene.generatePagesFromProps(this.props);
+                this.pageMaxHeightMap = {};
+                this.initialPageIndex = 0;
+
+                this.setState({
+                    pages: newPages,
+                    userId: user.getId(),
+                    activeTab: 0,
+                    tabAnimProps: this.createTabAnimProps(newPages.length),
+                }, this.onPagesReset);
+            },
+        );
+        if (this.getShowPopoverState()) {
+            this.startPopoverTimer();
         }
-        if (this.infiniteViewPagerRef) this.infiniteViewPagerRef.onFocus();
-        this.setCloseVendorTimer();
-        this.setEventTimer();
+    }
 
-        await this.getReviewData();
+    componentDidUpdate() {
+        const { pages } = this.state;
+        this.favoriteIndex = this.findFavoritePageIndex(pages);
     }
 
     componentWillUnmount() {
-        this.expireTimers();
-        if (this.cancelToken) this.cancelToken.cancel();
-        if (this.reviewCancelToken) this.reviewCancelToken.cancel();
-        if (this.infiniteViewPagerRef) this.infiniteViewPagerRef.onBlur();
-    }
-
-    getReviewData = async () => {
-        this.isGettingData = true;
-        const { reviewData, reviewPage, vendor } = this.state;
-        const { rootStore } = this.props;
-        const branchStore = rootStore.getStore('branchStore');
-        const idKey = '_id';
-
-        this.reviewCancelToken = getCancelToken();
-        const getReviewData = await branchStore.getVendorReviews({
-            vendorId: vendor[idKey],
-            page: reviewPage,
-            sortType: this.reviewSortType,
-            networkParameters: {
-                cancelToken: this.reviewCancelToken.token,
-            },
-        });
-        this.reviewCancelToken = undefined;
-        if (getReviewData.error) {
-            // 리뷰 데이터 에러시 어떻게 처리할까나?
-            return;
+        this.fetchTabDataFunctions = undefined;
+        if (this.userListener) {
+            this.userListener();
         }
 
-        if (getReviewData.reviewData.length > 0) {
-            // 리뷰 list page nation 최대 갯수 20
-            // 첫 request가 몇개 안될때 progress 사라지지 않는 문제 수정
-            let extraState = {};
-            if (getReviewData.reviewData.length < 20) {
-                this.reviewDataEnd = true;
-                extraState = { reviewProgressBar: false };
-            }
+        this.cancelPendingRequests();
+        this.cancelTokenMap = undefined;
+        this.closePopOver();
+    }
+
+    getShowPopoverState = () => {
+        const { rootStore } = this.props;
+        const { userId } = this.state;
+        const isShowPopover = rootStore.getStore('sceneStore').getIsShowCategoryPopover();
+        let showState = false;
+        if (isShowPopover && !_.isEmpty(userId)) {
+            showState = true;
+        }
+        return showState;
+    }
+
+    saveIsShowPopover = () => {
+        if (this.getShowPopoverState()) {
+            const { rootStore } = this.props;
+            rootStore.getStore('sceneStore').setIsShowCategoryPopover(false);
+        }
+    }
+
+    startPopoverTimer = () => {
+        if (!this.popoverTimeout) {
+            this.setState({ popoverIsVisible: true });
+            this.popoverTimeout = setTimeout(
+                this.changePopoverState,
+                this.POPOVER_TIME,
+            );
+        }
+    }
+
+    changePopoverState = () => {
+        this.saveIsShowPopover();
+        this.closePopOver();
+    }
+
+    closePopOver = () => {
+        const { popoverIsVisible } = this.state;
+        if (popoverIsVisible) {
             this.setState({
-                reviewData: reviewData.concat(getReviewData.reviewData),
-                reviewPage: reviewPage + 1,
-                ...extraState,
-            }, () => { this.isGettingData = false; });
-        } else {
-            this.isGettingData = false;
-            this.reviewDataEnd = true;
-            this.setState({ reviewProgressBar: false });
-        }
-    }
-
-    onChangeReviewStandard = (sortType) => {
-        this.setState({
-            reviewPage: 0,
-            reviewData: [],
-            reviewProgressBar: true,
-        }, () => {
-            this.reviewSortType = sortType;
-            this.reviewDataEnd = false;
-            this.getReviewData();
-        });
-    }
-
-    getReviewHeight = () => {
-        const { rootStore } = this.props;
-        const cartStore = rootStore.getStore('cartStore');
-        const getCartItemCount = cartStore.getCartItemCount();
-        const cartButtonHeight = getCartItemCount !== 0
-            ? LayoutConfig.CART_SHORTCUT_BUTTON_HEIGHT
-            : 0;
-
-        return LayoutConfig.DRAWABLE_HEIGHT
-            - LayoutConfig.NAVBAR_HEIGHT
-            - LayoutConfig.SafeAreaInsets.bottom
-            - cartButtonHeight
-            - TAB_BAR_BOTTOM_MARGIN
-            - TAB_BAR_HEIGHT;
-    }
-
-    loadVendor = async (vendorId) => {
-        const { rootStore, navigation } = this.props;
-        const branchStore = rootStore.getStore('branchStore');
-
-        this.cancelToken = getCancelToken();
-        const result = await branchStore.getVendor({
-            vendorId,
-            networkParameters: {
-                cancelToken: this.cancelToken.token,
-            },
-        });
-        this.cancelToken = undefined;
-
-        if (result.error) {
-            if (result.code !== NetworkConfig.ERROR_CODE_CANCEL) {
-                navigation.pop();
-            }
-            return { error: true };
-        }
-        const vendor = this.getTransformedVendor(result);
-        const state = { vendor };
-        const itemGroupsWithoutDefault = [];
-
-        vendor.itemGroups.forEach((itemGroup) => {
-            if (itemGroup.name !== 'defaultGroup' && itemGroup.items) {
-                if (itemGroup.items.length > 0) {
-                    itemGroupsWithoutDefault.push(itemGroup);
-                }
-            }
-        });
-        state.itemGroupsWithoutDefault = itemGroupsWithoutDefault;
-
-        let vendorMinPrice = vendor.settleInfo.minPrice;
-        const eventsData = vendor.eventInfo.events || [];
-        const itemEvents = _.filter(eventsData, { eventType: 'ITEM' });
-        const deliveryEvent = _.filter(eventsData, { eventType: 'DELIVERY' });
-
-        if (deliveryEvent.length > 0) {
-            vendorMinPrice = deliveryEvent[0].eventDetail.eventMinPrice;
-        }
-        if (vendor.isFavorited !== null && vendor.isFavorited !== undefined) {
-            state.isFavoriteVendor = vendor.isFavorited;
-        }
-
-        state.vendorMinPrice = vendorMinPrice;
-        state.deliveryEvent = deliveryEvent;
-        state.itemEvents = itemEvents;
-        state.totalReviewCount = vendor.stats.reviewCountForApp;
-        state.reviewHeaderText = vendor.stats.satisfactionText;
-        state.bestItemList = vendor.bestItemList;
-        this.setState(state);
-        return {};
-    }
-
-    setCloseVendorTimer = () => {
-        const { vendor } = this.state;
-        const getSecondsToClose = this.getSecondsToClose(vendor);
-
-        if ((getSecondsToClose && getSecondsToClose <= 1800)
-            && vendor.operatingTimeStatus.type === Globals.VendorStatus.OPEN) {
-            this.vendorClosingTimer = this.timerRefer.addTimer({
-                callback: () => {
-                    const leftSeconds = this.getSecondsToClose(vendor);
-                    if (!leftSeconds) {
-                        const { navigation } = this.props;
-                        const vendorId = navigation.getParam('vendorId');
-                        navigation.replace('ShopDetailScene', { vendorId });
-                        return;
-                    }
-                    this.setState({ secondsToClosed: leftSeconds });
-                },
-                millisecond: 1000,
-                type: TYPE.setInterval,
-            });
-        }
-    }
-
-    getTransformedVendor = (vendor) => {
-        // details 이미지 없을때 cover 이미지를 사용하기로 인화님과 협의함(05.15)
-        const detailsImage = _.get(vendor, 'appExposureInfo.images.details', []);
-        const coverImage = _.get(vendor, 'appExposureInfo.images.cover', undefined);
-
-        if (_.isEmpty(detailsImage) && !_.isEmpty(coverImage)) {
-            detailsImage[0] = coverImage;
-        }
-        const transformedVendor = { ...vendor };
-
-        // 베스트 뱃시 설정을 위한 data transform
-        const { bestItemList } = transformedVendor;
-        let hasBestList = false;
-        if (!_.isEmpty(bestItemList)) {
-            hasBestList = true;
-            transformedVendor.bestItemList = bestItemList.map((item) => {
-                const convertItem = item;
-                convertItem.isBestGoodsItem = true;
-                return item;
+                popoverIsVisible: false,
             });
         }
 
-        transformedVendor.itemGroups = vendor.itemGroups.map((itemGroup) => {
-            const newItemGroup = { ...itemGroup };
-            newItemGroup.items = newItemGroup.items || [];
-
-            if (_.isEmpty(newItemGroup.name)) {
-                newItemGroup.name = i18n.t('menu');
-            }
-
-            // 베스트 뱃시 설정을 위한 data transform
-            if (hasBestList && !_.isEmpty(newItemGroup.items)) {
-                newItemGroup.items = newItemGroup.items.map((item) => {
-                    const convertItem = item;
-                    const idKey = '_id';
-                    const findIndex = _.findIndex(bestItemList, ['_id', convertItem[idKey]]);
-                    if (findIndex >= 0) {
-                        convertItem.isBestGoodsItem = true;
-                    }
-                    return convertItem;
-                });
-            }
-            return newItemGroup;
-        });
-        transformedVendor.title = transformedVendor.name;
-        const validImagesUrl = [];
-        if (detailsImage) {
-            _.forEach(detailsImage, (url) => {
-                if (url && (url.length > 0)) {
-                    validImagesUrl.push(url);
-                }
-            });
-        }
-        _.set(transformedVendor, 'appExposureInfo.images.details', validImagesUrl);
-        console.log({ transformedVendor });
-        return transformedVendor;
-    }
-
-    getDayOfWeek = () => {
-        const dayNumber = moment().day();
-        let today;
-        if (dayNumber === 0) {
-            today = 'sunday';
-        } else if (dayNumber === 1) {
-            today = 'monday';
-        } else if (dayNumber === 2) {
-            today = 'tuesday';
-        } else if (dayNumber === 3) {
-            today = 'wednesday';
-        } else if (dayNumber === 4) {
-            today = 'thursday';
-        } else if (dayNumber === 5) {
-            today = 'friday';
-        } else if (dayNumber === 6) {
-            today = 'saturday';
-        }
-        return today;
-    }
-
-    getSecondsToClose = (vendor) => {
-        const { today } = this.state;
-        const { operationTimeInfo } = vendor;
-        const currentTime = moment().format('H:mm:ss').split(':');
-
-        if (!operationTimeInfo
-            || !operationTimeInfo.businessHour[today]
-            || !operationTimeInfo.businessHour[today].breaktimes) {
-            return null;
-        }
-        if (operationTimeInfo.businessHour[today].breaktimes[0].from) {
-            const breakTimeStart = operationTimeInfo.businessHour[today].breaktimes[0].from;
-            const breakTimeSplit = breakTimeStart.split(':');
-            const breakTimeDiff = ((breakTimeSplit[0] * 60) + (breakTimeSplit[1] * 1)) * 60
-                - (((currentTime[0] * 60) + (currentTime[1] * 1)) * 60 + (currentTime[2] * 1));
-            if (breakTimeDiff > 0 && breakTimeDiff <= 1800) {
-                return breakTimeDiff;
-            }
-        }
-        if (operationTimeInfo.businessHour[today].to) {
-            const closingTime = operationTimeInfo.businessHour[today].to.split(':');
-            const closingTimeDiff = ((closingTime[0] * 60) + ((closingTime[1] * 1) + 1)) * 60
-                - (((currentTime[0] * 60) + (currentTime[1] * 1)) * 60 + (currentTime[2] * 1));
-            if (closingTimeDiff > 0 && closingTimeDiff <= 1800) {
-                return closingTimeDiff;
-            }
-        }
-        return null;
-    }
-
-    onWillBlur = () => {
-        if (this.infiniteViewPagerRef) this.infiniteViewPagerRef.onBlur();
-    }
-
-    onDidFocus = () => {
-        if (this.infiniteViewPagerRef) this.infiniteViewPagerRef.onFocus();
-    }
-
-    checkItemEventsEnd = () => {
-        const { itemEvents } = this.state;
-        const { navigation } = this.props;
-
-        itemEvents.forEach((itemEvent) => {
-            const timeLeft = moment(itemEvent.to).diff(moment()) / Globals.AN_HOUR_IN_MILLISECONDS;
-            if (timeLeft === 0 || timeLeft < 0) {
-                navigation.replace('ShopDetailScene', { vendorId: itemEvent.vendorId });
-            }
-        });
-    }
-
-    setEventTimer = () => {
-        const { itemEvents } = this.state;
-
-        if (itemEvents.length > 0) {
-            this.itemEventsTimer = this.timerRefer.addTimer({
-                callback: this.checkItemEventsEnd,
-                millisecond: 1000,
-                type: TYPE.setInterval,
-            });
+        if (this.popoverTimeout) {
+            clearTimeout(this.popoverTimeout);
+            this.popoverTimeout = undefined;
         }
     }
 
-    expireTimers = () => {
-        if (this.vendorClosingTimer) this.timerRefer.clearTimer(this.vendorClosingTimer);
-        if (this.itemEventsTimer) this.timerRefer.clearTimer(this.itemEventsTimer);
-    }
-
-    renderForegroundHeader = () => {
-        const { vendor } = this.state;
-        const imagesUrl = _.get(vendor, 'appExposureInfo.images.details', []);
+    renderPopover = () => {
+        const { popoverIsVisible } = this.state;
+        const baseOffset = Platform.OS === 'android'
+            ? 0 : -LayoutConfig.SafeAreaInsets.top;
         return (
-            <View style={styles.naviHeader}>
-                <InfiniteViewPager
-                    ref={(refs) => { this.infiniteViewPagerRef = refs; }}
-                    width={styles.naviHeader.width}
-                    height={styles.naviHeader.height}
-                    imageList={imagesUrl}
-                    onPress={this.onClickHeaderImage}
-                    autoPlayInterval={Globals.VENDOR_IMAGE_PAGER_INTERVAL_TIMES}
-                    enableAutoPlay
-                />
-                {
-                    vendor.operatingTimeStatus.type !== Globals.VendorStatus.OPEN
-                    && this.renderHeaderOverlay()
-                }
-            </View>
-        );
-    }
-
-    renderHeaderOverlay = () => {
-        const { vendor } = this.state;
-        const shopStateText = getShopStateText(vendor.operatingTimeStatus.type);
-        return (
-            <TouchableOpacity
-                style={styles.foregroundHeader}
-                onPress={this.onClickHeaderImage}
-                activeOpacity={1}
+            <Popover
+                isVisible={popoverIsVisible}
+                fromRect={this.popoverRect}
+                placement="bottom"
+                showBackground={false}
+                popoverStyle={styles.popoverStyle}
+                onClose={this.changePopoverState}
+                showInModal={false}
+                verticalOffset={baseOffset}
             >
-                <View style={styles.foregroundOverlay}>
-                    <Text style={styles.foregroundOverlayText}>
-                        {shopStateText}
+                <View style={styles.popoverTextContainer}>
+                    <Text style={styles.distanceComment1}>
+                        {i18n.t('custom_category')}
                     </Text>
                 </View>
-            </TouchableOpacity>
+            </Popover>
         );
     }
 
-    processAnalytic = () => {
+    createTabAnimProps = (
+        numberOfPages,
+        initialValues,
+        initialOffsetValue,
+        initialMaxValues,
+    ) => (
+            numberOfPages > 0
+                ? NavBarHelper.getMultiScrollAnimationProps({
+                    numScrollViews: numberOfPages,
+                    min: NavigationSearchBar.getCollapsedHeight(),
+                    max: NavigationSearchBar.getHeight(),
+                    initialValues,
+                    initialOffsetValue,
+                    initialMaxValues,
+                })
+                : {}
+        );
+
+    createTabViewProps = () => {
+        const tabViewProps = {
+            scrollEventThrottle: 16,
+            initialNumToRender: 1,
+            maxToRenderPerBatch: 7,
+            updateCellsBatchingPeriod: 150,
+        };
+
+        const deviceMemory = DeviceInfo.getTotalMemory();
+
+        const maxMemoryInMb = deviceMemory / 1024 / 1024;
+
+        const memThreshold1 = Platform.OS === 'ios' ? 1000 : 3000;
+        const memThreshold2 = Platform.OS === 'ios' ? 700 : 2000;
+
+        if (maxMemoryInMb >= memThreshold1) {
+            tabViewProps.windowSize = 7;
+        } else if (maxMemoryInMb >= memThreshold2) {
+            tabViewProps.windowSize = Platform.OS === 'ios' ? 7 : 5;
+            tabViewProps.maxToRenderPerBatch = 5;
+        } else {
+            tabViewProps.windowSize = 3;
+            tabViewProps.maxToRenderPerBatch = 2;
+            tabViewProps.updateCellsBatchingPeriod = 200;
+        }
+        return tabViewProps;
+    }
+
+    cancelPendingRequests = () => {
+        const { pages } = this.state;
+        for (let i = 0; i < pages.length; i += 1) {
+            const cancelToken = this.cancelTokenMap[i];
+            if (cancelToken) {
+                cancelToken.cancel();
+                this.cancelTokenMap[i] = undefined;
+            }
+        }
+    }
+
+    findFavoritePageIndex = (pages) => {
+        for (let i = 0; i < pages.length; i += 1) {
+            if (pages[i].isForFavorites) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    loadMoreInTab = (tab) => {
+        if (!this.fetchTabDataFunctions[tab]) {
+            this.fetchTabDataFunctions[tab] = this.createFetchTabDataFunction(tab);
+        }
+        this.fetchTabDataFunctions[tab]();
+    }
+
+    createFetchTabDataFunction = tab => () => {
+        const { pages } = this.state;
+        const activeTabPageInfo = pages[tab];
+
+        if (!activeTabPageInfo || activeTabPageInfo.endReached) {
+            return;
+        }
+
+        let cancelToken = this.cancelTokenMap[tab];
+        if (cancelToken) {
+            cancelToken.cancel();
+            this.cancelTokenMap[tab] = undefined;
+        }
+
+        cancelToken = getCancelToken();
+        this.cancelTokenMap[tab] = cancelToken;
+
+        this.fetchData({
+            foodCategory: activeTabPageInfo.foodCategory,
+            page: activeTabPageInfo.currentPageIndex + 1,
+            tab,
+            cancelToken,
+        });
+    };
+
+    fetchData = async ({
+        page,
+        tab,
+        cancelToken,
+    }) => {
+        try {
+            const { rootStore } = this.props;
+            const { pages, sortType } = this.state;
+            const currentTabPage = pages[tab];
+
+            const {
+                foodCategory,
+                isForBestCategory,
+                isForFavorites,
+                isForEvents,
+                isForRecommendCategory,
+            } = currentTabPage;
+
+            const branchStore = rootStore.getStore('branchStore');
+            const result = await branchStore.getVendorsForList({
+                foodCategory,
+                isForBestCategory,
+                isForFavorites,
+                isForEvents,
+                isForRecommendCategory,
+                page,
+                sortType,
+                networkParameters: {
+                    cancelToken: cancelToken.token,
+                },
+            });
+
+            if (result.error && result.code === Globals.ERROR_CODE_CANCEL) {
+                return;
+            }
+
+            this.setState((prevState) => {
+                let needToUpdatePages = false;
+
+                const newPages = prevState.pages.slice(0);
+                const newTabPage = { ...newPages[tab] };
+                newPages[tab] = newTabPage;
+                const newState = {};
+
+                if (newTabPage.refreshing) {
+                    needToUpdatePages = true;
+                    newTabPage.refreshing = false;
+                }
+
+                if (result.error || newTabPage.currentPageIndex >= page) {
+                    if (needToUpdatePages) {
+                        newState.pages = newPages;
+                        return newState;
+                    }
+
+                    return null;
+                }
+
+                if (!result.vendors || result.vendors.length < 1) {
+                    needToUpdatePages = true;
+                    newTabPage.endReached = true;
+                } else {
+                    const userStore = rootStore.getStore('userStore');
+                    // The data from server and the schema to show the list are different.
+                    const transformed = ListHelper.ShopList.getTransformedVendorData({
+                        vendors: result.vendors,
+                        displayFavorite: userStore.getUser().isValid(),
+                    });
+
+                    newTabPage.pageData = _.concat(newTabPage.pageData, transformed);
+                    if (newTabPage.isForBestCategory || newTabPage.isForRecommendCategory) {
+                        newTabPage.endReached = true;
+                    }
+                    needToUpdatePages = true;
+                }
+
+                if (needToUpdatePages) {
+                    newTabPage.currentPageIndex = page;
+                    newState.pages = newPages;
+
+                    return newState;
+                }
+
+                return null;
+            });
+        } catch (error) {
+            // eslint-disable-next-line
+            console.log('[fetchData] error:', error);
+        }
+    }
+
+    processAnalyticCategory = (params) => {
+        const { index } = params;
+        try {
+            const { pages } = this.state;
+            const categoryName = _.get(pages, [`${index}`, 'foodCategoryForAnalytic'], undefined);
+            if (categoryName) {
+                FirebaseHelper.analyticsLogEventForSingle({
+                    eventName: categoryName,
+                });
+            }
+        } catch (error) {
+            console.error(error);
+        }
+    }
+
+    onChangeTab = (index) => {
+        this.setState((prevState) => {
+            const { activeTab } = prevState;
+            if (index === activeTab) {
+                return null;
+            }
+            this.processAnalyticCategory({ index });
+            return { activeTab: index };
+        }, () => {
+            const { pages } = this.state;
+            // This upcoming page is not initialized(not loaded the data)
+            if (pages[index].currentPageIndex === -1) {
+                this.loadMoreInTab(index);
+            }
+        });
+    }
+
+    onEndReached = (index) => {
+        // https://github.com/Flipkart/recyclerlistview/issues/64
+        const { pages } = this.state;
+        if (pages[index].currentPageIndex === -1) {
+            return;
+        }
+        this.loadMoreInTab(index);
+    }
+
+    onContentSizeChange = (_width, height, index) => {
+        const { pages } = this.state;
+
+        if (pages[index].currentPageIndex >= 0) {
+            if (this.pageMaxHeightMap[index] != null
+                && this.pageMaxHeightMap[index] >= height) {
+                return;
+            }
+            this.pageMaxHeightMap[index] = height;
+            this.onContentSizeExpand(height, index);
+        }
+    }
+
+    onContentSizeExpand = (size, index) => {
+        const { tabAnimProps } = this.state;
+
+        ShopListScene.setNodeMaxValue(
+            tabAnimProps,
+            this.getScrollMaxValueForSize(size),
+            index,
+        );
+    }
+
+    getScrollMaxValueForSize = (size) => {
+        const maxValue = size - this.tabViewRef.current.getPageHeight();
+        return Math.max(0, maxValue);
+    }
+
+    onItemPress = (data) => {
+        if (data.vendorId === 'none') {
+            return;
+        }
+        const { navigation } = this.props;
+        navigation.navigate('ShopDetailScene', {
+            vendorId: data.vendorId,
+        });
         FirebaseHelper.analyticsLogEvent({
             checkEvents: {
-                [EVENT_NAME_TABLE.RDShopDetail]: EVENT_NAME_TABLE.RDGoodsDetail,
-                [EVENT_NAME_TABLE.OHShopDetail]: EVENT_NAME_TABLE.OHGoodsDetail,
-                [EVENT_NAME_TABLE.RSShopDetail]: EVENT_NAME_TABLE.RSGoodsDetail,
-                [EVENT_NAME_TABLE.PShopDetail]: EVENT_NAME_TABLE.PGoodsDetail,
-                [EVENT_NAME_TABLE.NSShopDetail]: EVENT_NAME_TABLE.NSGoodsDetail,
-                [EVENT_NAME_TABLE.RDSShopDetail]: EVENT_NAME_TABLE.RDSGoodsDetail,
-                [EVENT_NAME_TABLE.RSSSShopDetail]: EVENT_NAME_TABLE.RSSSGoodsDetail,
-                [EVENT_NAME_TABLE.RDBYShopDetail]: EVENT_NAME_TABLE.RDBYGoodDetail,
-                [EVENT_NAME_TABLE.RDHSShopDetail]: EVENT_NAME_TABLE.RDHSGoodsDetail,
-                [EVENT_NAME_TABLE.RDBYHSShopDetail]: EVENT_NAME_TABLE.RDBYHSGoodsDetail,
-                [EVENT_NAME_TABLE.RDSShopDetail1]: EVENT_NAME_TABLE.RDSGoodsDetail1,
-                [EVENT_NAME_TABLE.RDBYSShopDetail]: EVENT_NAME_TABLE.RDBYSGoodsDetail,
-                [EVENT_NAME_TABLE.RDPShopDetail]: EVENT_NAME_TABLE.RDPGoodsDetail,
-                [EVENT_NAME_TABLE.MPShopDetail]: EVENT_NAME_TABLE.MPGoosDetail,
+                [EVENT_NAME_TABLE.RDShopList]: EVENT_NAME_TABLE.RDShopDetail,
             },
         });
     }
 
-    onPressGoods = (item) => {
-        const { vendor } = this.state;
-        const { navigation } = this.props;
-        const idKey = '_id';
-        navigation.navigate('GoodsDetailScene', {
-            vendorId: vendor[idKey],
-            itemId: item[idKey],
-        });
-        this.processAnalytic();
-    }
-
-    flashScrollBar = () => {
-        if (this.deliveryCostDetail) this.deliveryCostDetail.flashScrollIndicators();
-    }
-
-    renderDeliveryCostModal = () => {
-        const { vendor } = this.state;
-        const { status, estimatedDeliveryFee } = vendor;
-        return (
-            <DeliveryCostDetailModal
-                ref={(refs) => { this.deliveryCostDetail = refs; }}
-                status={status}
-                estimatedDeliveryFee={estimatedDeliveryFee}
-                onPressModalCancel={this.onPressModalCancel}
-            />
-        );
-    }
-
-    toggleMinPriceModal = () => {
-        if (this.minPriceModal) this.minPriceModal.toggle();
-    }
-
-    renderMinPriceModal = () => {
-        const { navigation } = this.props;
-        const { vendor, vendorMinPrice } = this.state;
-        return (
-            <MinPriceModal
-                ref={(refs) => { this.minPriceModal = refs; }}
-                vendor={vendor}
-                navigation={navigation}
-                minPrice={vendorMinPrice}
-            />
-        );
-    }
-
-    toggleDeliveryDiscountModal = () => {
-        if (this.discountModal) this.discountModal.toggle();
-    }
-
-    checkCartDeliveryCost = (deliveryCost) => {
-        this.setState({ cartDeliveryCost: deliveryCost });
-    }
-
-    renderDeliveryDiscountModal = () => {
-        const { navigation } = this.props;
-        const {
-            deliveryEvent,
-            cartDeliveryCost,
-            vendor,
-            vendorMinPrice,
-        } = this.state;
-        return (
-            <DiscountInfoModal
-                ref={(refs) => { this.discountModal = refs; }}
-                navigation={navigation}
-                deliveryEvent={deliveryEvent}
-                cartDeliveryCost={cartDeliveryCost}
-                vendor={vendor}
-                minPrice={vendorMinPrice}
-            />
-        );
-    }
-
-    onClickHeaderImage = () => {
-        const { vendor } = this.state;
-        const { navigation } = this.props;
-        const imagesUrl = _.get(vendor, 'appExposureInfo.images.details', []);
-        const vendorTitle = vendor.title || '';
-        navigation.navigate({
-            routeName: 'ImageViewerScene',
-            params: {
-                title: vendorTitle,
-                images: imagesUrl,
-            },
-        });
-    }
-
-    onPressReviewImage = (imageUrl) => {
-        const { vendor } = this.state;
-        const { navigation } = this.props;
-        const vendorTitle = vendor.title || '';
-
-        if (imageUrl) {
-            // 추후 복수 이미지가 될 경우, 아래 배열에 추가 (19/11/19 김호연)
-            const imageUrls = [imageUrl];
-
-            navigation.navigate({
-                routeName: 'ImageViewerScene',
-                params: {
-                    title: vendorTitle,
-                    images: imageUrls,
-                },
-            });
-        }
-    }
-
-    onClickDeliveryCostDetail = () => {
-        this.setState({ deliveryCostModalVisible: true });
-    }
-
-    onPressModalCancel = () => {
-        this.setState({ deliveryCostModalVisible: false });
-    }
-
-    renderShopInfoBody = () => {
-        const { vendor, vendorMinPrice } = this.state;
-        return (
-            <ShopInfoBodyView
-                vendor={vendor}
-                onPressDelivery={this.onClickDeliveryCostDetail}
-                minPrice={vendorMinPrice}
-            />
-        );
-    }
-
-    onTabPress = (activeTabIndex) => {
-        const { activatedTab, useReminder } = this.state;
-
-        if (activatedTab === activeTabIndex) {
-            return;
-        }
-        if (activeTabIndex === 2) {
-            this.outsideScrollToEnd();
-            FirebaseHelper.analyticsLogEventForReview({
-                eventName: REVIEW_EVENT_NAME_TABLE.Review,
-            });
-            this.setState({ useReminder: false });
-        } else if (activeTabIndex !== 2) {
-            if (!useReminder) {
-                this.setState({ useReminder: true });
-            }
-        }
-        this.setState({ activatedTab: activeTabIndex });
-    }
-
-    onReviewReachedEnd = () => {
-        if (!this.isGettingData && !this.reviewDataEnd) {
-            this.getReviewData();
-        }
-    }
-
-    checkDeliveryDiscount = () => {
-        const { deliveryEvent, vendor } = this.state;
-
-        if ((deliveryEvent.length === 0 && vendor.estimatedDeliveryFee.discountTable.length === 0)
-            || !vendor.status.isAffiliation) {
-            return false;
-        }
-        return true;
-    }
-
-    renderProgressBar = () => (
-        <View style={styles.rootView}>
-            <ProgressBar
-                style={styles.progress}
-                visible
-            />
-        </View>
-    )
-
-    onReachedScrollEnd = ({ layoutMeasurement, contentOffset, contentSize }) => {
-        const layoutHeight = _.ceil(layoutMeasurement.height);
-        const offsetY = _.ceil(contentOffset.y);
-        const contentHeight = _.floor(contentSize.height);
-        return layoutHeight + offsetY >= contentHeight - 20;
-    }
-
-    onScrollOutside = ({ nativeEvent }) => {
-        const { reviewScrollEnabled, activatedTab } = this.state;
-        if (activatedTab === 2) {
-            if (!reviewScrollEnabled) {
-                if (this.onReachedScrollEnd(nativeEvent)) {
-                    this.setState({ reviewScrollEnabled: true });
-                }
-            }
-            if (reviewScrollEnabled) {
-                if (!this.onReachedScrollEnd(nativeEvent)) {
-                    this.setState({ reviewScrollEnabled: false });
-                }
-            }
-        }
-    }
-
-    renderTabContent = () => {
-        const {
-            activatedTab,
-            itemGroupsWithoutDefault,
-            vendor,
-            itemEvents,
-            reviewData,
-            reviewHeight,
-            totalReviewCount,
-            reviewScrollEnabled,
-            reviewHeaderText,
-            userId,
-            reviewProgressBar,
-            bestItemList,
-        } = this.state;
-        return this.tabData.map((tabItem, index) => {
-            const { screen: PassedComponent } = tabItem;
-            const mapKey = index;
-            const style = (activatedTab === index)
-                ? { display: 'flex' }
-                : { display: 'none' };
-
-            const props = {
-                key: mapKey,
-                style,
-            };
-
-            switch (index) {
-                case 0: {
-                    props.itemGroups = itemGroupsWithoutDefault;
-                    props.status = vendor.operatingTimeStatus.type;
-                    props.onPressGoods = this.onPressGoods;
-                    props.itemEvents = itemEvents;
-                    props.bestItemList = bestItemList;
-                    break;
-                }
-                case 1: {
-                    props.vendor = vendor;
-                    break;
-                }
-                case 2: {
-                    props.reviewData = reviewData;
-                    props.totalReviewCount = totalReviewCount;
-                    props.reviewHeight = reviewHeight;
-                    props.onReviewReachedEnd = this.onReviewReachedEnd;
-                    props.onChangeReviewStandard = this.onChangeReviewStandard;
-                    props.reviewScrollEnabled = reviewScrollEnabled;
-                    props.nPressDeleteReview = this.onPressDeleteReview;
-                    props.userId = userId;
-                    props.onPressReviewImage = this.onPressReviewImage;
-                    props.reviewProgressBar = reviewProgressBar;
-                    props.reviewHeaderText = reviewHeaderText;
-                    props.onPressReviewLike = this.onPressReviewLike;
-                    break;
-                }
-                default:
-                    break;
-            }
-
-            return (
-                <PassedComponent
-                    {...props}
-                />
-            );
-        });
-    }
-
-    onPressReviewLike = (params) => {
-        const { rootStore } = this.props;
-        const branchStore = rootStore.getStore('branchStore');
-        const { reviewId } = params;
-
-        branchStore.updateReviewLikeCount({ reviewId });
-    }
-
-    onPressDeleteReview = (reviewId) => {
-        const deleteReviewDialogProps = {
-            description: i18n.t('ask_delete_review'),
-            ...DialogHelper.getOkCancelButtonProps({
-                rightTitle: i18n.t('ok'),
-                leftTitle: i18n.t('cancel'),
-                rightOnPress: () => {
-                    this.setState({ deleteReviewDialogProps: null }, () => {
-                        this.deleteReview(reviewId);
-                    });
-                },
-                leftOnPress: () => {
-                    this.setState({ deleteReviewDialogProps: null });
-                },
-            }),
-        };
-        this.setState({ deleteReviewDialogProps });
-    }
-
-    deleteReview = async (reviewId) => {
-        const { rootStore } = this.props;
-        const { reviewData } = this.state;
-        const branchStore = rootStore.getStore('branchStore');
-        const result = await branchStore.deleteVendorReviews({ reviewId });
-
-        if (result.error) {
-            Toast.show(i18n.t('response_error_500'), Toast.SHORT);
-            return;
-        }
-        const newReviewData = reviewData;
-        const targetReviewIndex = _.findIndex(reviewData, { _id: reviewId });
-
-        if (targetReviewIndex !== -1) {
-            newReviewData.splice(targetReviewIndex, 1);
-            this.setState({ reviewData: newReviewData });
-        }
-    }
-
-    renderDeleteReviewDialog = () => {
-        const { deleteReviewDialogProps } = this.state;
-        const isVisible = !!deleteReviewDialogProps;
-        return (
-            <ModalAlertButtonDialog
-                isVisible={isVisible}
-                {...deleteReviewDialogProps}
-            />
-        );
-    }
-
-    outsideScrollToEnd = () => {
-        if (this.scrollViewRef) {
-            this.scrollViewRef.scrollToEnd();
-        }
-    }
-
-    onPressFavoriteIcon = async () => {
+    onItemFavoritePress = async (data, index) => {
         const { rootStore } = this.props;
         const userStore = rootStore.getStore('userStore');
-        const { vendor, isFavoriteVendor } = this.state;
-        const idKey = '_id';
-        const reversedFavorite = !isFavoriteVendor;
 
         if (this.favCancelToken) {
             this.favCancelToken.cancel();
         }
         this.favCancelToken = getCancelToken();
         const result = await userStore.setFavorite({
-            vendorId: vendor[idKey],
-            isFavorited: reversedFavorite,
+            vendorId: data.vendorId,
+            isFavorited: !data.favorite,
             networkParameters: {
                 cancelToken: this.favCancelToken.token,
             },
@@ -835,189 +563,388 @@ class ShopDetailScene extends Component {
         if (result.error) {
             return;
         }
-        this.setState({ isFavoriteVendor: reversedFavorite });
+
+        this.updateLocalFavoriteData(data, index);
+    }
+
+    updateLocalFavoriteData = (data, index) => {
+        const { pages, activeTab, sortType } = this.state;
+        const newPages = pages.slice(0);
+
+        const newFavoritePage = this.getResettedPage(newPages[this.favoriteIndex]);
+        newPages[this.favoriteIndex] = newFavoritePage;
+
+        if (activeTab === this.favoriteIndex) {
+            const cancelToken = this.cancelTokenMap[this.favoriteIndex];
+            if (cancelToken) {
+                cancelToken.cancel();
+            }
+            this.setState({ pages: newPages, scrollEnabled: false }, () => {
+                this.tabViewRef.current.setSearchBarState(true, () => {
+                    this.resetAllPages(sortType, this.onPagesReset);
+                });
+            });
+            return;
+        }
+
+        this.resetFavoritePage(data, index);
+    }
+
+    resetFavoritePage = (data, index) => {
+        const { activeTab } = this.state;
+
+        if (Platform.OS === 'ios' && Globals.APP_MODE === DEV_MODE) {
+            // Hack for IOS in __DEV__ mode since RN currently has a bug which causes a crash
+            // when you recreate animation props for diffclamp
+            this.resetFavAnimStateDevIOS();
+        } else {
+            this.resetFavAnimState();
+        }
+
+        this.pageMaxHeightMap[this.favoriteIndex] = undefined;
+        this.tabViewRef.current.setScrollValueOffset(this.favoriteIndex, 0);
+
+        this.setState((prevState) => {
+            const { pages } = prevState;
+            const newPages = pages.slice(0);
+            newPages[activeTab] = { ...newPages[activeTab] };
+            const newPageData = newPages[activeTab].pageData.slice(0);
+
+            const newFavoritePage = this.getResettedPage(newPages[this.favoriteIndex]);
+            newPages[this.favoriteIndex] = newFavoritePage;
+
+            const newVendor = { ...newPageData[index] };
+            newVendor.favorite = !data.favorite;
+            newPageData[index] = newVendor;
+            newPages[activeTab].pageData = newPageData;
+
+            return { pages: newPages };
+        });
+    }
+
+    resetFavAnimState = () => {
+        const { pages } = this.state;
+        const resetIndexData = {};
+        resetIndexData[this.favoriteIndex] = 0;
+
+        const offsetData = this.tabViewRef.current.getResetDiffClampOffsets(resetIndexData);
+        // TODO: Instead of this flow, send offsetData through props and let ShopListTabView
+        // handle everything through componentDidUpdate
+        this.tabViewRef.current.prepareForDiffClampReset(offsetData);
+
+        const { offsetValue, scrollValues } = offsetData;
+        const tabAnimProps = this.createTabAnimProps(
+            pages.length,
+            scrollValues,
+            offsetValue,
+        );
+
+        // Initial max values are not working for some reason
+        // so we have to set it afterwards like this
+        for (let i = 0; i < pages.length; i += 1) {
+            if (this.pageMaxHeightMap[i] != null) {
+                ShopListScene.setNodeMaxValue(
+                    tabAnimProps,
+                    this.getScrollMaxValueForSize(this.pageMaxHeightMap[i]),
+                    i,
+                );
+            }
+        }
+
+        this.setState({ tabAnimProps });
+    }
+
+    resetFavAnimStateDevIOS = () => {
+        const currentOffsetValue = this.tabViewRef.current.getOffsetValue();
+        const favScrollOffset = this.tabViewRef.current.getScrollValueOffset(this.favoriteIndex);
+        const newOffsetValue = currentOffsetValue + favScrollOffset;
+
+        const { tabAnimProps } = this.state;
+        const { scrollValues, offsetValue } = tabAnimProps.animationProps;
+
+        scrollValues[this.favoriteIndex].scrollValue.setValue(0);
+        offsetValue.setValue(newOffsetValue);
+        global.requestAnimationFrame(() => {
+            this.tabViewRef.current.snapOffsetValue();
+        });
+    }
+
+    processAnalytic = () => {
+        FirebaseHelper.analyticsLogEvent({
+            eventName: EVENT_NAME_TABLE.BYSSShopListSearch,
+        });
+    }
+
+    getResettedPage = (page) => {
+        const resettedPage = { ...page };
+        resettedPage.pageData = [];
+        resettedPage.currentPageIndex = -1;
+        resettedPage.endReached = false;
+
+        return resettedPage;
+    }
+
+    onRefresh = (index) => {
+        const { pages, activeTab } = this.state;
+        if (!pages[index]
+            || activeTab !== index) {
+            return;
+        }
+        const newPages = pages.slice(0);
+        const newPage = this.getResettedPage(newPages[index]);
+        newPage.refreshing = true;
+        newPages[index] = newPage;
+
+        this.pageMaxHeightMap[index] = undefined;
+
+        this.setState({ pages: newPages }, () => {
+            this.loadMoreInTab(index);
+        });
+    }
+
+    onChangeSorter = (sortType) => {
+        const { sortType: stateSortType } = this.state;
+        if (sortType === stateSortType) {
+            return;
+        }
+        const { rootStore } = this.props;
+        const sceneStore = rootStore.getStore('sceneStore');
+        sceneStore.setActiveShopListSortType(sortType);
+
+        const nonSortablePages = this.getNonSortablePages();
+        this.resetAllPages(sortType, () => {
+            const { pages, activeTab } = this.state;
+
+            const newPages = pages.slice(0);
+            _.forOwn(nonSortablePages, (nonSortablePage, key) => {
+                newPages[key] = nonSortablePage;
+            });
+            this.setState({ pages: newPages });
+
+            if (ShopListScene.isNonSortablePage(newPages[activeTab])) {
+                return;
+            }
+            this.onPagesReset();
+        });
+    }
+
+    getNonSortablePages = () => {
+        const { pages } = this.state;
+        const nonSortablePages = {};
+        pages.forEach((page, index) => {
+            if (ShopListScene.isNonSortablePage(page)) {
+                nonSortablePages[index] = page;
+            }
+        });
+        return nonSortablePages;
+    }
+
+    resetAllPages = (sortType, callback) => {
+        this.tabViewRef.current.resetAllCalculations();
+        this.cancelPendingRequests();
+        this.pageMaxHeightMap = {};
+        const pages = ShopListScene.generatePagesFromProps(this.props);
+
+        const { tabAnimProps } = this.state;
+        const { scrollValues, offsetValue } = tabAnimProps.animationProps;
+
+        this.setState({
+            sortType,
+            pages,
+            navBarAnimDisabled: true,
+            scrollEnabled: false,
+        }, () => {
+            // Hack to reset the diff clamp internals without
+            // affecting the user experience since
+            // there is currently a bug in React Native
+            // that prevents you from unmounting a diffclamp
+            // without having it crashing in dev mode on IOS
+
+            offsetValue.setValue(Number.MAX_SAFE_INTEGER);
+            global.requestAnimationFrame(() => {
+                scrollValues.forEach(({ scrollValue }) => {
+                    scrollValue.setValue(0);
+                });
+                offsetValue.setValue(0);
+                this.setState({ navBarAnimDisabled: false, scrollEnabled: true }, () => {
+                    if (callback) {
+                        callback();
+                    }
+                });
+            });
+        });
+    }
+
+    onPagesReset = () => {
+        const { activeTab, pages } = this.state;
+        if (pages[activeTab].currentPageIndex === -1) {
+            this.loadMoreInTab(activeTab);
+        }
+    }
+
+    onChangeText = (searchText, callback) => {
+        this.setState({ searchText }, callback);
+    }
+
+    onPressClear = () => { this.onChangeText(''); }
+
+    onSubmitEditing = () => {
+        const { searchText } = this.state;
+        const { navigation } = this.props;
+        if (searchText && searchText.length > 0) {
+            navigation.navigate('ShopSearchScene', {
+                keyword: searchText,
+                onItemFavoritePress: () => {
+                    const { sortType } = this.state;
+                    this.resetAllPages(sortType, this.onPagesReset);
+                },
+            });
+            this.processAnalytic();
+            return;
+        }
+        Toast.show(i18n.t('empty_search_word'), Toast.SHORT);
+    }
+
+    onDidBlur = () => {
+        this.setState({ searchText: undefined });
+    }
+
+    getInitialPageIndex = () => {
+        const { navigation } = this.props;
+        if (this.initialPageIndex == null) {
+            const category = navigation.getParam('category', '');
+            this.initialPageIndex = Math.max(0, this.getPageIndex(category));
+        }
+
+        return this.initialPageIndex;
+    }
+
+    getPageIndex = (category) => {
+        const { pages } = this.state;
+        for (let i = 0; i < pages.length; i += 1) {
+            const page = pages[i];
+            if (page.foodCategory === category) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    onPressHistoryItem = (text) => {
+        this.onChangeText(text, this.onSubmitEditing);
+    }
+
+    isSorterDisabled = () => {
+        const { pages, activeTab } = this.state;
+        const page = pages[activeTab] || {};
+
+        return ShopListScene.isNonSortablePage(page);
     }
 
     render() {
         const { navigation } = this.props;
         const {
-            vendor,
-            secondsToClosed,
-            vendorMinPrice,
-            deliveryCostModalVisible,
-            useReminder,
-            isFavoriteVendor,
-            isUserValid,
+            pages,
+            activeTab,
+            sortType,
+            searchText,
+            tabAnimProps,
+            navBarAnimDisabled,
+            scrollEnabled,
+            userId,
         } = this.state;
 
-        if (!vendor) return this.renderProgressBar();
-
-        const details = _.get(vendor, 'appExposureInfo.images.details', undefined);
-        let vendorName = vendor.title;
-
-        if (vendor.vendorBranchName !== null && vendor.vendorBranchName !== undefined) {
-            vendorName = `${vendor.name} ${vendor.vendorBranchName}`;
+        if (pages.length < 1) {
+            return null;
         }
-        const headerData = {
-            url: details,
-            title: vendorName,
-        };
-        const idKey = '_id';
-        const doingDeliveryDiscount = this.checkDeliveryDiscount();
-        const isIosDevice = Platform.OS === 'ios';
+
+        let clampedScroll;
+        if (tabAnimProps.animationProps) {
+            clampedScroll = tabAnimProps.animationProps.clampedScroll || clampedScroll;
+        }
+        const initialPage = this.getInitialPageIndex();
 
         return (
             <View style={styles.rootView}>
-                {isIosDevice && (<StatusBar />)}
-                <ModalBase
-                    isVisible={deliveryCostModalVisible}
-                    style={styles.deliveryCostModal}
-                    onShow={this.flashScrollBar}
+                <View style={[
+                    styles.tabViewContainer,
+                    { top: NavigationSearchBar.getCollapsedHeight() },
+                ]}
                 >
-                    {this.renderDeliveryCostModal()}
-                </ModalBase>
-                <NavHeaderScrollView
-                    scrollRef={(ref) => { this.scrollViewRef = ref; }}
-                    data={headerData}
-                    titleParam={{
-                        titleStyle: { marginHorizontal: wsv(40) },
-                        titleProps: { numberOfLines: 1, ellipsizeMode: 'tail' },
-                    }}
-                    navigator={navigation}
-                    imageHeight={wsv(200)}
-                    headerBackgroundColor="transparent"
-                    renderForegroundHeader={this.renderForegroundHeader}
-                    secondsToClosed={secondsToClosed}
-                    outputScaleValue={6}
-                    useBackButtonGradient
-                    notUseStatusBar={isIosDevice}
-                    useFavoriteIcon={isUserValid}
-                    isFavoriteVendor={isFavoriteVendor}
-                    onPressFavoriteIcon={this.onPressFavoriteIcon}
-                    showsVerticalScrollIndicator={false}
-                    onScroll={this.onScrollOutside}
-                    bounces={false}
-                >
-                    <View style={styles.contentView}>
-                        {this.renderShopInfoBody()}
-                    </View>
-                    <HorizontalTabBar
-                        style={styles.tabBar}
-                        tabs={this.tabData.map(item => item.title)}
-                        onTabPress={this.onTabPress}
+                    <NavigationEvents onDidBlur={this.onDidBlur} />
+                    <ShopListTabView
+                        key={`tabView${userId}`}
+                        ref={this.tabViewRef}
+                        data={pages}
+                        onViewableTabChanged={this.onChangeTab}
+                        contentProps={this.tabViewProps}
+                        onPageEndReached={this.onEndReached}
+                        onContentSizeChange={this.onContentSizeChange}
+                        onItemPress={this.onItemPress}
+                        onItemFavoritePress={this.onItemFavoritePress}
+                        onRefresh={this.onRefresh}
+                        activeTab={activeTab}
+                        barHeight={NavigationSearchBar.getHeight()}
+                        collapsedBarHeight={NavigationSearchBar.getCollapsedHeight()}
+                        initialPage={initialPage}
+                        navBarAnimDisabled={navBarAnimDisabled}
+                        scrollEnabled={scrollEnabled}
+                        pageOnEndReachedThreshold={ShopListScene.ONEND_REACHED_THRESHOLD}
+                        {...tabAnimProps}
                     />
-                    {this.renderTabContent()}
-                    {
-                        useReminder && (
-                            <Text style={styles.reminderView}>
-                                {i18n.t('shop_detail_reminder')}
-                            </Text>
-                        )
-                    }
-                </NavHeaderScrollView>
-                <CartShortcutButton
-                    navigation={navigation}
-                    minPrice={vendorMinPrice}
-                    toggleMinPriceModal={this.toggleMinPriceModal}
-                    toggleDeliveryDiscountModal={this.toggleDeliveryDiscountModal}
-                    vendorId={vendor[idKey]}
-                    canIgnoreMinPrice={vendor.settleInfo.canIgnoreMinPrice}
-                    checkCartDeliveryCost={this.checkCartDeliveryCost}
-                    doingDeliveryDiscount={doingDeliveryDiscount}
+                    <CartShortcutButton navigation={navigation} />
+                </View>
+                <NavigationSearchBar
+                    title={i18n.t('shop_list_scene_title')}
+                    navigator={navigation}
+                    showSorter={!this.isSorterDisabled()}
+                    sorter={Globals.SHOPLIST_SORTER}
+                    onChangeSorter={this.onChangeSorter}
+                    initialSortType={sortType}
+                    showLocation
+                    showRecentSearch
+                    onPressHistoryItem={this.onPressHistoryItem}
+                    placeholder={i18n.t('shop_list_searchbar_placeholder')}
+                    scrollValue={navBarAnimDisabled ? undefined : clampedScroll}
+                    onSubmitEditing={this.onSubmitEditing}
+                    onChangeText={this.onChangeText}
+                    onPressClear={this.onPressClear}
+                    value={searchText}
                 />
-                <SafeAreaView
-                    style={styles.safeArea}
-                    forceInset={{ bottom: 'always' }}
-                />
-                {this.renderMinPriceModal()}
-                {this.renderDeliveryDiscountModal()}
-                {this.renderDeleteReviewDialog()}
-                <NavigationEvents
-                    onWillBlur={this.onWillBlur}
-                    onDidFocus={this.onDidFocus}
-                />
-                <TimerHelper ref={(refs) => { this.timerRefer = refs; }} />
+                {this.renderPopover()}
             </View>
         );
     }
 }
 
-export default injectStore({ component: ShopDetailScene });
+export default injectStore({ component: ShopListScene, observe: false });
 
 const styles = StyleSheet.create({
     rootView: {
         flex: 1,
+        width: '100%',
         backgroundColor: StyleConfig.WHITE_FOUR,
     },
-    foregroundHeader: {
+    tabViewContainer: {
         position: 'absolute',
-        top: 0,
-        width: LayoutConfig.SCREEN_WIDTH,
-        height: wsv(200),
+        left: 0,
+        right: 0,
+        bottom: 0,
     },
-    foregroundOverlay: {
-        position: 'absolute',
-        width: '100%',
-        height: '100%',
-        alignItems: 'center',
-        justifyContent: 'center',
-        backgroundColor: StyleConfig.BLACK_THREE50,
+    popoverTextContainer: {
+        marginVertical: wsv(7),
     },
-    foregroundOverlayText: {
-        ...textStyles.boldText,
-        fontSize: wsv(20),
-        color: StyleConfig.WHITE_FOUR,
-        textDecorationLine: 'underline',
+    popoverStyle: {
+        width: wsv(190),
+        height: wsv(40),
+        backgroundColor: StyleConfig.BLACK,
     },
-    navigator: {
-        backgroundColor: 'transparent',
-        borderBottomWidth: 0,
-    },
-    naviHeader: {
-        width: LayoutConfig.SCREEN_WIDTH,
-        height: wsv(200),
-    },
-    contentView: {
-        marginTop: wsv(21),
-        marginHorizontal: wsv(30),
-        marginBottom: wsv(20),
-    },
-    tabBar: {
-        width: LayoutConfig.SCREEN_WIDTH,
-        height: wsv(47),
-        paddingLeft: wsv(28),
-        paddingRight: wsv(28),
-        marginBottom: wsv(20),
-    },
-    reminderView: {
-        marginTop: wsv(10),
-        paddingVertical: wsv(24),
-        paddingHorizontal: wsv(19),
-        backgroundColor: StyleConfig.WHITE_TWO,
-        color: StyleConfig.WARM_GREY,
-        lineHeight: wsv(20),
-        letterSpacing: wsv(-0.5),
+    distanceComment1: {
+        ...textStyles.regularText,
         fontSize: wsv(10),
-    },
-    cart: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        width: LayoutConfig.SCREEN_WIDTH,
-        height: wsv(55),
-        paddingVertical: wsv(14),
-        paddingHorizontal: wsv(30),
-        backgroundColor: StyleConfig.MAIZE,
-    },
-    deliveryCostModal: {
+        lineHeight: wsv(13),
+        color: StyleConfig.WHITE_FOUR,
+        textAlign: 'left',
         alignSelf: 'center',
-        width: wsv(345),
-        height: wsv(454),
-    },
-    progress: {
-        backgroundColor: 'transparent',
-    },
-    safeArea: {
-        backgroundColor: 'transparent',
     },
 });
